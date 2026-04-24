@@ -3,13 +3,10 @@ from google_auth_oauthlib.flow import InstalledAppFlow
 from google.oauth2.credentials import Credentials
 from google.auth.transport.requests import Request
 import os.path
-import threading
+import sqlite3
 
 # If modifying these scopes, delete the file token.json.
-SCOPES = ["https://www.googleapis.com/auth/contacts.readonly",
-          "https://www.googleapis.com/auth/directory.readonly"]
-
-data: list = []
+SCOPES = ["https://www.googleapis.com/auth/directory.readonly"]
 
 
 def wrap_error(func):
@@ -58,52 +55,10 @@ def authenticate() -> None:
     try:
         service = build("people", "v1", credentials=creds)
 
-        fetch_contacts(service)
         fetch_directory_contacts(service)
 
     except Exception as err:
         print("Error: ", err)
-
-
-@wrap_error
-def fetch_contacts(service):
-
-    finished: bool = False
-    next_page_token: str = None
-    data: set = set()
-    count: int = 0
-
-    print("Fetching Contacts...", end="\r")
-
-    while not finished:
-
-        results = service.people().connections().list(
-            resourceName='people/me',
-            personFields='names,emailAddresses',
-            pageSize=1000,
-        ).execute()
-
-        connections = results.get("connections", [])
-
-        count += len(connections)  # Increment the count of records fetched
-        print(f"Fetching Contacts {count}...", end='\r')
-
-        for person in connections:
-            # Store email addresses (if multiple) in a list after fetching from dict
-            emailAddresses: list = person.get("emailAddresses", [])
-
-            # Check if the value exists
-            if emailAddresses:
-                for email in emailAddresses:  # Iterate over lists
-                    data.add(email['value'].strip())
-
-        # Fetch the next page of results (1k)
-        next_page_token = results.get('nextPageToken')
-
-        # If no more results then exit the while loop
-        finished = not next_page_token
-
-    write_contacts_file(data)
 
 
 @wrap_error
@@ -113,7 +68,7 @@ def fetch_directory_contacts(service) -> None:
     """
     finished: bool = False
     next_page_token: str = None
-    data: set = set()
+    data: list = []
     count: int = 0
 
     print("Fetching Directory Contacts...", end='\r')
@@ -122,7 +77,7 @@ def fetch_directory_contacts(service) -> None:
 
         # Fetch results of listing directory
         results = service.people().listDirectoryPeople(
-            readMask='names,emailAddresses',
+            readMask='names,emailAddresses,externalIds',
             pageSize=1000,
             sources="DIRECTORY_SOURCE_TYPE_DOMAIN_PROFILE",
             pageToken=next_page_token,
@@ -136,11 +91,21 @@ def fetch_directory_contacts(service) -> None:
         for person in result:
             # Store email addresses (if multiple) in a list after fetching from dict
             emailAddresses: list = person.get("emailAddresses", [])
+            names: list = person.get("names", [])
+            externalIds: list = person.get("externalIds", [])
+            
+            name = names[0].get("displayName", "N/A") if names else "N/A"
+            emp_id = "N/A"
+            
+            for ext_id in externalIds:
+                if ext_id.get('type') in ['organization', 'employee', 'account']:
+                    emp_id = ext_id.get('value', 'N/A')
+                    break
 
             # Check if the value exists
             if emailAddresses:
                 for email in emailAddresses:  # Iterate over lists
-                    data.add(email['value'].strip())
+                    data.append((name, email['value'].strip(), emp_id))
 
         # Fetch the next page of results (1k)
         next_page_token = results.get('nextPageToken')
@@ -148,65 +113,21 @@ def fetch_directory_contacts(service) -> None:
         # If no more results then exit the while loop
         finished = not next_page_token
 
-    write_directory_file(data)
-
-
-def perform_write(list: list, filename: str, contact_type: str) -> None:
-    """
-    Write the contents of a list to the specified filename
-    """
-
-    if list:
-        with open(filename, "w") as file:
-            for i, data in enumerate(list):
-                print(f"Progress (Writing to File): {i}/{len(list)}", end='\r')
-                file.write(data + "\n")
-
-        print(f"{filename} Successfully Written!")
-
-    else:
-        print(f"{contact_type} is Empty! No Records found!")
-
-
-def write_contacts_file(data_set: set) -> None:
-    """
-    """
-    data: list = sorted(data_set)
-
-    threading.Thread(target=perform_write, args=(
-        data, "contacts_emails.txt", "Personal Contacts")).start()
-
-
-def write_directory_file(data_set: set) -> None:
-    """
-    Create 2 threads to write to 2 files.
-    File 1 (directory_emails_alphabetic.txt) contains emails sorted by their name.
-    File 2 (directory_emails_domain.txt) contains emails sorted by the domain
-    """
-
-    if not data_set:
-        print("No Directory Exists!")
-        return
-
-    data: list = sorted(data_set)
-    data_sortby_domain: list = sorted(data_set, key=domain)
-
-    thread1 = threading.Thread(target=perform_write, args=(
-        data, "directory_emails_alphabetic.txt", "Directory Contacts"))
-
-    thread2 = threading.Thread(target=perform_write, args=(
-        data_sortby_domain, "directory_emails_domain.txt", "Directory Contacts"))
-
-    thread1.start()
-    thread2.start()
-
-
-def domain(email) -> str:
-    """
-    Return the domains of the specified email
-    """
-    _, domain = email.split('@')
-    return domain
+    conn = sqlite3.connect("directory.sqlite3")
+    cursor = conn.cursor()
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS contacts (
+            name TEXT,
+            email TEXT UNIQUE,
+            employee_id TEXT
+        )
+    ''')
+    cursor.executemany('''
+        INSERT OR REPLACE INTO contacts (name, email, employee_id)
+        VALUES (?, ?, ?)
+    ''', data)
+    conn.commit()
+    conn.close()
 
 
 if __name__ == "__main__":
