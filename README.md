@@ -59,13 +59,114 @@ SELECT * FROM contacts WHERE name LIKE '%Abhiraj%';
 
 ## Using filter.py
 
-For searching large datasets (380k+ contacts), use `filter.py` with multi-threaded queries:
+`filter.py` searches the local database. Run it with no arguments for the interactive menu:
 
-```python
-queries = [<many queries>]
+```bash
+python filter.py
 ```
 
-Much faster than running queries one at a time.
+```
+Search by:
+  1) Name
+  2) Email
+  3) Employee ID
+  4) All fields
+  5) Match mode: contains
+  6) Result limit: none
+  q) Quit
+```
+
+Pick a field, then type search terms one after another - blank input goes back to the
+menu, `q` quits. Option 5 cycles the match mode between `contains`, `exact`, and `regex`;
+option 6 caps how many results each search prints.
+
+### Regex filters
+
+Keep only the contacts whose fields follow a pattern:
+
+```bash
+python filter.py --id-regex '^2025B2PS[0-9]{4}P$'
+python filter.py --email-regex '^f2025[0-9]{4}@pilani'
+python filter.py --regex 'sahoo'                          # any of the three fields
+python filter.py --name-regex '^TANISHA' --email-regex '@pilani' --regex-mode all
+```
+
+Regexes are case-insensitive unless you pass `--regex-case-sensitive`. Multiple flags are
+OR-ed by default; `--regex-mode all` requires every pattern to match. Combined with search
+terms, the regexes narrow the term results instead of scanning the whole table:
+
+```bash
+python filter.py '%tanisha%' --email-regex 'pilani\.bits' --limit 5
+```
+
+### Batch queries
+
+Many terms at once is much faster than running them one at a time:
+
+```bash
+python filter.py --queries-file list.txt
+python filter.py --generate --prefix 2025B2PS --suffix P --start 1 --stop 2000
+python filter.py --contains 'sharma' 'gupta'
+```
+
+### Ordering and threads
+
+Results come back sorted ascending by name. Both scripts share these flags:
+
+| Flag | Meaning |
+| --- | --- |
+| `--sort-by` | Sort ascending by `name`, `email`, `employee_id`, or a comma-separated list |
+| `--no-sort` | Leave rows in database order |
+| `--workers` | Search threads (defaults to CPU count capped at 8; `1` is serial) |
+
+Sorting is case-insensitive. In the interactive menu, option 7 cycles the sort field.
+
+Each search term costs a full table scan, so terms are spread across worker threads -
+SQLite releases the GIL while stepping rows. Measured on 399k contacts with 16 terms:
+
+| Workers | filter.py | export.py |
+| --- | --- | --- |
+| 1 | 1.34s | 1.56s |
+| 4 | 0.64s | 0.83s |
+| 8 | 0.63s | 0.85s |
+
+Regex scans are the exception: matching happens in Python's `re`, which holds the GIL, so
+extra threads do not help there and the scan caps itself at 4 workers.
+
+## Exporting with export.py
+
+`export.py` takes the same search terms and regex filters as `filter.py`, but writes the
+selected fields to a file instead of printing records.
+
+```bash
+# just the emails, one per line, no commas
+python export.py --email-regex '^f2025' --format lines -o emails.txt
+
+# CSV with all three columns
+python export.py --id-regex '^2025B2PS[0-9]{4}P$' -o batch2025.csv
+
+# pick your columns
+python export.py '%tanisha%' --fields name,email --sort -o tanisha.csv
+```
+
+| Flag | Meaning |
+| --- | --- |
+| `-f, --format` | `csv` (default), `tsv`, or `lines` for one value per line |
+| `--fields` | `name`, `email`, `employee_id` (aliases: `id`, `mail`); defaults to all three, or `email` for `lines` |
+| `-o, --output` | Output file; defaults to stdout |
+| `--no-header` | Skip the CSV/TSV header row |
+| `--limit` | Cap the total rows written |
+| `--keep-duplicates` | Keep repeated rows (duplicates are dropped by default) |
+
+Exports are sorted ascending by the selected fields (so `--fields email` gives a sorted
+email list); `--sort-by` and `--no-sort` override that.
+
+`--format lines` writes a single field per line, so it only accepts one field. The
+"exported N rows" summary goes to stderr, which keeps piped output clean:
+
+```bash
+python export.py --email-regex '@pilani' --format lines > emails.txt
+```
 
 ## Notes
 
